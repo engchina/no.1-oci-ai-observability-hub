@@ -1,87 +1,70 @@
 # no.1-oci-ai-observability-hub
-Deploy Langfuse on OCI Compute and provide a friendly observability dashboard for OCI Generative AI / Enterprise AI logs, metrics, traces, costs, and request correlation.
 
-## What This Deploys
+OCI Generative AI の Chat / Embedding / Rerank 利用量とコストを、Project 単位で確認するためのデスクトップアプリです。
 
-This repository contains an OCI Terraform stack that provisions:
+## できること
 
-- One Ubuntu OCI Compute instance
-- Host firewall rules for Langfuse (`3000`) and MinIO media uploads (`9090`)
-- A cloud-init bootstrap that downloads this repository from GitHub `main` and runs `init_script.sh`
-- Langfuse v3 via the official Docker Compose deployment
+- OCI APIキー設定を保存します: テナンシ OCID、ユーザー OCID、フィンガープリント、リージョン、秘密鍵 PEM、既定 Compartment、既定 Project、既定 Chat / Embedding / Rerank モデル。
+- OCI Generative AI Chat を実行し、モデルID、入力/出力トークン、入力/出力文字数、レイテンシ、`opc-request-id`、推定コストを使用量レコードへ自動記録します。
+- OCI Generative AI Embedding を実行し、入力文字数、ベクトル件数、次元数、`opc-request-id`、推定コストを使用量レコードへ自動記録します。
+- OCI Generative AI Rerank を実行し、検索クエリ、候補文書、順位件数、`opc-request-id`、推定コストを使用量レコードへ自動記録します。
+- 使用量画面で自動記録されたレコードを検索し、Project 名または Project OCID、Request ID、Price List単位の推定コストを確認できます。
+- Oracle 公式価格 API から OCI Generative AI / OCI Generative AI Agents の対象SKUを取得し、リクエスト/トランザクション、文字、入力/キャッシュ入力/出力トークン、検索ユニット、イベント、GB時間、イメージ、専用ユニット時間、接続分の価格ルールに変換します。
+- OCI Usage API から公式コストを直接取得し、Project / compartment / region に基づいて使用量へ按分できます。
+- 概要画面で、推定コスト、公式コスト、未照合コスト、モデル別使用量、Project 別使用量とコストを確認できます。
 
-The OCI VCN, public subnet, and ingress rules for SSH, Langfuse (`3000`), and MinIO (`9090`) should be prepared before running the stack.
-
-The Terraform/cloud-init pattern follows the same idea used by `engchina/No.1-RAG`: Terraform injects a cloud-init payload into OCI Compute, and the instance downloads the application repository from GitHub before running a first-boot init script.
-
-## Files
-
-- `init_script.sh`: downloaded from `engchina/no.1-oci-ai-observability-hub` on the `main` branch during boot; installs Docker, clones Langfuse, generates secrets, writes `.env`, creates `langfuse.service`, and starts Docker Compose.
-- `terraform/stack`: OCI Resource Manager friendly Terraform stack.
-- `terraform/stack/cloud_init`: cloud-init templates used to pass configuration and bootstrap the GitHub download.
-
-## Deploy With Terraform CLI
-
-```bash
-cd terraform/stack
-terraform init
-terraform plan \
-  -var='compartment_ocid=<compartment_ocid>' \
-  -var='availability_domain=<availability_domain>' \
-  -var='existing_vcn_id=<existing_vcn_ocid>' \
-  -var='existing_subnet_id=<existing_public_subnet_ocid>' \
-  -var='ssh_authorized_keys=<ssh_public_key>' \
-  -var='langfuse_admin_email=<admin_email>' \
-  -var='langfuse_admin_password=<admin_password>'
-terraform apply
-```
-
-After apply, use the `langfuse_url` output. The default URL is:
+Oracle 公式価格は次のエンドポイントから取得します。
 
 ```text
-http://<instance-public-ip>:3000
+https://apexapps.oracle.com/pls/apex/cetools/api/v1/products/
 ```
 
-## Deploy With OCI Resource Manager
+公式コストは、保存済みのOCI APIキーで次のUsage APIへ署名付きPOSTして取得します。
 
-Create a stack from this repository, set the working directory to `terraform/stack`, and provide:
+```text
+https://usageapi.<region>.oci.oraclecloud.com/20200107/usage
+```
 
-- `compartment_ocid`
-- `availability_domain`
-- `existing_vcn_id`
-- `existing_subnet_id`
-- `ssh_authorized_keys`
-- `langfuse_admin_email`
-- `langfuse_admin_password`
+このアプリは OCI Generative AI Chat / Embedding / Rerank の実行と、Oracle Price List に掲載される OCI Generative AI / OCI Generative AI Agents 対象SKUの使用量確認に集中しています。その他の AI 実行 API、外部トレース連携、Compute デプロイ機能は対象外です。
 
-Optional values include the compute shape, custom image OCID, pinned container image versions, and initial organization name.
+## デスクトップアプリ
 
-For Network Configuration in OCI Resource Manager, select the existing VCN and existing public subnet that you prepared in advance.
+- React 18 + Vite + TypeScript
+- Tauri 2
+- ローカル app-data JSON 永続化
+- GitHub Actions による Windows / macOS パッケージ作成
 
-The default pinned images are:
+すべての画面文言は日本語です。
 
-- `docker.io/langfuse/langfuse:3.176.0`
-- `docker.io/langfuse/langfuse-worker:3.176.0`
-- `docker.io/clickhouse/clickhouse-server:25.8`
-- `cgr.dev/chainguard/minio@sha256:6357b3cbf5a16136bae0fbbf94406fef4de924f69b9632b0aaa5f788338ae6ad`
-- `docker.io/redis:7.4`
-- `docker.io/postgres:17.10`
+## 開発
 
-The initial login username is `langfuse_admin_email`; the password is `langfuse_admin_password`.
-
-## Operations
-
-SSH to the instance using the `ssh_to_instance` output, then inspect startup logs:
+依存関係をインストールします。
 
 ```bash
-sudo tail -f /var/log/cloud-init-langfuse.log /var/log/langfuse-init.log
+npm install
 ```
 
-Manage Langfuse:
+Tauri デスクトップアプリを起動します。
 
 ```bash
-sudo systemctl status langfuse
-sudo systemctl restart langfuse
-cd /opt/no1-oci-ai-observability-hub/langfuse
-sudo docker compose --env-file .env ps
+npm run dev
 ```
+
+ブラウザのみで確認する場合は次を使います。OCI Generative AI 実行はデスクトップアプリから利用してください。
+
+```bash
+npm run dev:web
+```
+
+## ビルド
+
+```bash
+npm run build
+npm run tauri build
+```
+
+## 公式コスト取得
+
+公式コスト画面で開始日、終了日、粒度を指定して「OCIから公式コストを取得」を実行します。日次取得は90日以内、月次取得は12か月以内で指定してください。サービスフィルターはカンマ区切りで複数指定できます。空欄にすると全サービスを取得します。
+
+API取得には、OCI IAMポリシーでUsage APIまたはCost Analysisの読み取り権限が必要です。請求・使用量データは反映まで時間差があります。
