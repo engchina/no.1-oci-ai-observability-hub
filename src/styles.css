@@ -2,11 +2,42 @@
 
 :root {
   font-family: Inter, "Noto Sans JP", system-ui, sans-serif;
-  color: #f8fafc;
-  background: #070b19;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
+
+  /* Default / Eye Care Soft Dark */
+  color: #cbd5e1;
+  background: #0f172a;
+  --ink: #e2e8f0;
+  --muted: #94a3b8;
+  --line: rgba(255, 255, 255, 0.06);
+  --panel: rgba(30, 41, 59, 0.7);
+  --panel-soft: rgba(51, 65, 85, 0.45);
+  --blue: #60a5fa;
+  --blue-deep: #2563eb;
+  --green: #34d399;
+  --red: #f87171;
+  --amber: #fbbf24;
+  --focus: #34d399;
+
+  /* Additional Premium Dark Theme Tokens */
+  --glow-blue: rgba(96, 165, 250, 0.08);
+  --glow-green: rgba(52, 211, 153, 0.08);
+  --glow-amber: rgba(251, 191, 36, 0.08);
+  --glow-red: rgba(248, 113, 113, 0.08);
+  --panel-border: rgba(255, 255, 255, 0.08);
+
+  --bg-main: #0f172a;
+  --bg-sidebar: #1e293b;
+  --bg-gradient-blue: rgba(96, 165, 250, 0.04);
+  --bg-gradient-green: rgba(52, 211, 153, 0.03);
+  --bg-gradient-purple: rgba(129, 140, 248, 0.02);
+}
+
+:root.theme-deep-dark {
+  color: #f8fafc;
+  background: #070b19;
   --ink: #f8fafc;
   --muted: #94a3b8;
   --line: rgba(255, 255, 255, 0.08);
@@ -18,13 +49,18 @@
   --red: #ef4444;
   --amber: #f59e0b;
   --focus: #10b981;
-  
-  /* Additional Premium Dark Theme Tokens */
+
   --glow-blue: rgba(59, 130, 246, 0.15);
   --glow-green: rgba(16, 185, 129, 0.15);
   --glow-amber: rgba(245, 158, 11, 0.15);
   --glow-red: rgba(239, 68, 68, 0.15);
   --panel-border: rgba(255, 255, 255, 0.06);
+
+  --bg-main: #070b19;
+  --bg-sidebar: #020617;
+  --bg-gradient-blue: rgba(59, 130, 246, 0.08);
+  --bg-gradient-green: rgba(16, 185, 129, 0.05);
+  --bg-gradient-purple: rgba(99, 102, 241, 0.05);
 }
 
 * {
@@ -54,15 +90,15 @@ body {
   height: 100dvh;
   overflow: hidden;
   overscroll-behavior-y: contain;
-  background-color: #070b19;
+  background-color: var(--bg-main);
 }
 
 #root {
   height: 100%;
   background-image: 
-    radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.08) 0px, transparent 50%),
-    radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.05) 0px, transparent 50%),
-    radial-gradient(at 50% 0%, rgba(99, 102, 241, 0.05) 0px, transparent 50%);
+    radial-gradient(at 0% 0%, var(--bg-gradient-blue) 0px, transparent 50%),
+    radial-gradient(at 100% 100%, var(--bg-gradient-green) 0px, transparent 50%),
+    radial-gradient(at 50% 0%, var(--bg-gradient-purple) 0px, transparent 50%);
   background-attachment: fixed;
 }
 
@@ -135,9 +171,9 @@ select:focus-visible {
 .sidebar {
   height: 100%;
   min-height: 0;
-  background: #020617;
+  background: var(--bg-sidebar);
   border-right: 1px solid var(--panel-border);
-  color: #f8fafc;
+  color: var(--ink);
   padding: 24px 18px;
   display: flex;
   flex-direction: column;
@@ -253,8 +289,9 @@ select:focus-visible {
   margin-top: auto;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
-  color: #64748b;
+  color: var(--muted);
   font-size: 13px;
   font-weight: 500;
   padding: 8px 4px;
@@ -1596,6 +1633,10 @@ h2 {
   text-transform: uppercase;
 }
 
+.regionPrivateKeyField {
+  scroll-margin-top: 96px;
+}
+
 input,
 textarea,
 select {
@@ -1606,6 +1647,53 @@ select {
   background: rgba(15, 23, 42, 0.5);
   color: #ffffff;
   padding: 9px 12px;
+}
+
+.filePickerShell {
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.5);
+  color: #cbd5e1;
+  padding: 4px;
+  cursor: pointer;
+}
+
+.filePickerShell:hover {
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.field:focus-within .filePickerShell {
+  background-color: rgba(15, 23, 42, 0.7);
+  border-color: var(--green);
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.25);
+}
+
+.filePickerButton {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.14);
+  color: #f8fafc;
+  font-size: 13px;
+  font-weight: 800;
+  padding: 0 12px;
+}
+
+.filePickerName {
+  min-width: 0;
+  overflow: hidden;
+  color: #94a3b8;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .passwordFieldShell {
@@ -1712,6 +1800,88 @@ textarea {
 
 .usageApiGrid {
   align-items: end;
+}
+
+.filterControlGroup {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.36);
+  padding: 12px;
+}
+
+.filterControlGroup legend {
+  padding: 0 6px;
+  color: #bfdbfe;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.checkGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.checkOption {
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 8px;
+  background: rgba(2, 6, 23, 0.32);
+  color: #cbd5e1;
+  padding: 9px 10px;
+  cursor: pointer;
+}
+
+.checkOption:has(input:checked) {
+  border-color: rgba(16, 185, 129, 0.46);
+  background: rgba(16, 185, 129, 0.08);
+}
+
+.checkOption:focus-within {
+  border-color: var(--focus);
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.2);
+}
+
+.checkOption input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--green);
+}
+
+.checkOption span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.checkOption strong {
+  color: #f8fafc;
+  font-size: 13px;
+}
+
+.checkOption small {
+  overflow: hidden;
+  color: #94a3b8;
+  font-size: 11px;
+  font-family: "SFMono-Regular", "Cascadia Code", monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filterSummaryLine {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .officialReadiness {
@@ -4138,4 +4308,110 @@ tr:hover td {
     color: var(--muted);
     letter-spacing: 0.04em;
   }
+}
+
+/* Theme Selector Styles */
+.themeSelectorContainer {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+  gap: 16px;
+  margin-top: 12px;
+}
+
+@media (max-width: 768px) {
+  .themeSelectorContainer {
+    grid-template-columns: 1fr;
+  }
+}
+
+.themeOption {
+  display: block;
+  cursor: pointer;
+}
+
+.themeOption input[type="radio"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+
+.themeCard {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+  padding: 16px;
+  background: var(--panel-soft);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  transition: all 200ms ease;
+}
+
+.themeOption:hover .themeCard {
+  border-color: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.themeOption input[type="radio"]:checked + .themeCard {
+  border-color: var(--blue);
+  background: rgba(96, 165, 250, 0.08);
+  box-shadow: 0 0 0 1px var(--blue);
+}
+
+.themeCard svg {
+  color: var(--blue);
+  flex: 0 0 auto;
+}
+
+.themeCard strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+  margin-bottom: 4px;
+}
+
+.themeCard span {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+/* Sidebar Footer & Theme Toggle Button Styles */
+.sidebarFooterStatus {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.themeQuickToggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 200ms ease;
+  padding: 0;
+}
+
+.themeQuickToggle:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.15);
+  color: var(--ink);
+  transform: translateY(-1px);
+}
+
+.themeQuickToggle:active {
+  transform: scale(0.95);
 }

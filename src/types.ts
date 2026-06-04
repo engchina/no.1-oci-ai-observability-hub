@@ -164,6 +164,7 @@ export interface OciUsageCostRequest {
   timeUsageEnded: string;
   granularity: OciUsageGranularity;
   serviceFilter?: string;
+  compartmentFilters?: string[];
   compartmentDepth?: number;
   groupBy?: string[];
 }
@@ -189,7 +190,7 @@ export interface OciAiRunRequest {
 }
 
 export interface OciAiRunResult {
-  kind: "native-chat" | "embedding" | "rerank";
+  kind: "native-chat" | "enterprise-chat" | "embedding" | "rerank";
   text: string;
   rawResponse: unknown;
   modelId: string;

@@ -136,6 +136,17 @@ export const runOciGenerativeAiChat = async (
   return desktopOnly();
 };
 
+export const runOciEnterpriseAiChat = async (
+  state: AppState,
+  request: OciAiRunRequest
+): Promise<OciAiRunResult> => {
+  if (isTauri()) {
+    return invoke<OciAiRunResult>("run_oci_enterprise_ai_chat", { settings: state.settings, request });
+  }
+
+  return desktopOnly();
+};
+
 export const runOciEmbedding = async (
   state: AppState,
   request: OciAiRunRequest

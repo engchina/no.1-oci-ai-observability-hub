@@ -426,6 +426,117 @@ async fn read_oci_response(
     })
 }
 
+fn enterprise_ai_chat_url(settings: &Value) -> Result<Url, String> {
+    let base_url = required_setting(settings, "enterpriseAiBaseUrl", "Enterprise AI Base URL")?;
+    let trimmed = base_url.trim_end_matches('/');
+    let endpoint = if trimmed.ends_with("/chat/completions") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/chat/completions")
+    };
+    Url::parse(&endpoint)
+        .map_err(|error| format!("Enterprise AI Chat URLの作成に失敗しました: {error}"))
+}
+
+fn enterprise_ai_project_ocid(settings: &Value, request: &Value) -> Result<String, String> {
+    let request_project_ocid = read_request_string(request, "projectOcid");
+    if !request_project_ocid.is_empty() {
+        return Ok(request_project_ocid);
+    }
+
+    required_setting(
+        settings,
+        "enterpriseAiProjectOcid",
+        "Enterprise AI Project OCID",
+    )
+}
+
+fn build_enterprise_chat_body(request: &Value) -> Result<Value, String> {
+    let model_id = read_request_string(request, "modelId");
+    if model_id.is_empty() {
+        return Err("モデルIDが未入力です。".to_string());
+    }
+    let prompt = read_request_string(request, "prompt");
+    if prompt.is_empty() {
+        return Err("プロンプトが未入力です。".to_string());
+    }
+
+    let mut messages = Vec::new();
+    let system_prompt = read_request_string(request, "systemPrompt");
+    if !system_prompt.is_empty() {
+        messages.push(json!({
+            "role": "system",
+            "content": system_prompt
+        }));
+    }
+    messages.push(json!({
+        "role": "user",
+        "content": prompt
+    }));
+
+    let mut body = json!({
+        "model": model_id,
+        "messages": messages,
+        "stream": false
+    });
+
+    if let Some(temperature) = read_request_number(request, "temperature") {
+        body["temperature"] = json!(temperature);
+    }
+    if let Some(top_p) = read_request_number(request, "topP") {
+        body["top_p"] = json!(top_p);
+    }
+    if let Some(max_tokens) = read_request_u64(request, "maxTokens") {
+        if max_tokens > 0 {
+            body["max_tokens"] = json!(max_tokens);
+        }
+    }
+
+    Ok(body)
+}
+
+async fn post_json_with_enterprise_ai_key(
+    settings: &Value,
+    url: Url,
+    project_ocid: &str,
+    body: Value,
+) -> Result<AiHttpResponse, String> {
+    let api_key = required_setting(settings, "enterpriseAiApiKey", "Enterprise AI APIキー")?;
+    let body_text = serde_json::to_string(&body)
+        .map_err(|error| format!("Enterprise AI リクエストJSONの作成に失敗しました: {error}"))?;
+    let authorization = format!("Bearer {api_key}");
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&authorization).map_err(|error| error.to_string())?,
+    );
+    if !project_ocid.trim().is_empty() {
+        headers.insert(
+            "openai-project",
+            HeaderValue::from_str(project_ocid.trim()).map_err(|error| error.to_string())?,
+        );
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("no1-oci-ai-observability-hub/0.1")
+        .build()
+        .map_err(|error| {
+            format!("OCI Enterprise AI Chat クライアントの作成に失敗しました: {error}")
+        })?;
+
+    let started_at = Instant::now();
+    let response = client
+        .post(url)
+        .headers(headers)
+        .body(body_text)
+        .send()
+        .await
+        .map_err(|error| format!("OCI Enterprise AI Chat の呼び出しに失敗しました: {error}"))?;
+    read_oci_response(response, started_at, "OCI Enterprise AI Chat").await
+}
+
 fn native_serving_mode(request: &Value) -> Result<Value, String> {
     let model_id = read_request_string(request, "modelId");
     if model_id.is_empty() {
@@ -648,25 +759,69 @@ fn read_service_filters(request: &Value) -> Vec<String> {
         .collect()
 }
 
-fn usage_service_filter(value: &str) -> Value {
+fn read_compartment_filters(request: &Value) -> Vec<String> {
+    request
+        .get("compartmentFilters")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .take(4)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn usage_dimension_filter(key: &str, value: &str) -> Value {
     json!({
         "operator": "AND",
-        "dimensions": [{ "key": "service", "value": value }],
+        "dimensions": [{ "key": key, "value": value }],
         "tags": [],
         "filters": []
     })
 }
 
-fn build_usage_filter(request: &Value) -> Option<Value> {
-    let filters = read_service_filters(request);
-    match filters.len() {
+fn usage_dimension_group_filter(key: &str, values: Vec<String>) -> Option<Value> {
+    match values.len() {
         0 => None,
-        1 => Some(usage_service_filter(&filters[0])),
+        1 => Some(usage_dimension_filter(key, &values[0])),
         _ => Some(json!({
             "operator": "OR",
             "dimensions": [],
             "tags": [],
-            "filters": filters.iter().map(|value| usage_service_filter(value)).collect::<Vec<Value>>()
+            "filters": values
+                .iter()
+                .map(|value| usage_dimension_filter(key, value))
+                .collect::<Vec<Value>>()
+        })),
+    }
+}
+
+fn build_usage_filter(request: &Value) -> Option<Value> {
+    let mut filters = Vec::new();
+    if let Some(service_filter) =
+        usage_dimension_group_filter("service", read_service_filters(request))
+    {
+        filters.push(service_filter);
+    }
+    if let Some(compartment_filter) =
+        usage_dimension_group_filter("compartmentId", read_compartment_filters(request))
+    {
+        filters.push(compartment_filter);
+    }
+
+    match filters.len() {
+        0 => None,
+        1 => filters.into_iter().next(),
+        _ => Some(json!({
+            "operator": "AND",
+            "dimensions": [],
+            "tags": [],
+            "filters": filters
         })),
     }
 }
@@ -987,6 +1142,15 @@ async fn run_oci_generative_ai_chat(settings: Value, request: Value) -> Result<V
 }
 
 #[tauri::command]
+async fn run_oci_enterprise_ai_chat(settings: Value, request: Value) -> Result<Value, String> {
+    let url = enterprise_ai_chat_url(&settings)?;
+    let project_ocid = enterprise_ai_project_ocid(&settings, &request)?;
+    let body = build_enterprise_chat_body(&request)?;
+    let response = post_json_with_enterprise_ai_key(&settings, url, &project_ocid, body).await?;
+    Ok(wrap_ai_result("enterprise-chat", &request, response))
+}
+
+#[tauri::command]
 async fn run_oci_embedding(settings: Value, request: Value) -> Result<Value, String> {
     let body = build_embedding_body(&settings, &request)?;
     let response = post_json_with_oci_signature(
@@ -1076,6 +1240,7 @@ pub fn run() {
             fetch_oracle_pricing,
             fetch_oci_usage_costs,
             run_oci_generative_ai_chat,
+            run_oci_enterprise_ai_chat,
             run_oci_embedding,
             run_oci_rerank,
             validate_oci_settings

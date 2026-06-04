@@ -61,6 +61,7 @@ import {
   getStorageLocation,
   loadAppState,
   runOciEmbedding,
+  runOciEnterpriseAiChat,
   runOciGenerativeAiChat,
   runOciRerank,
   saveOfficialCostExcel,
@@ -89,7 +90,7 @@ const navItems: Array<{ id: ViewId; label: string; caption: string; icon: Lucide
 ];
 
 const statusOptions: UsageRecord["status"][] = ["成功", "クライアントエラー", "サーバーエラー", "確認待ち"];
-type AiRunMode = "native-chat" | "embedding" | "rerank";
+type AiRunMode = "native-chat" | "enterprise-chat" | "embedding" | "rerank";
 type DashboardNextAction = {
   title: string;
   description: string;
@@ -119,21 +120,29 @@ type OfficialUsageQuery = {
   granularity: OciUsageGranularity;
   serviceFilter: string;
 };
+type OfficialCompartmentOption = {
+  label: string;
+  ocid: string;
+  defaultChecked: boolean;
+};
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const OFFICIAL_COST_PAGE_SIZE = 20;
+const USAGE_RECORD_PAGE_SIZE = OFFICIAL_COST_PAGE_SIZE;
 const DEFAULT_OFFICIAL_USAGE_GROUP_BY = ["service", "skuName", "compartmentId", "region"];
 const DEFAULT_OFFICIAL_SERVICE_FILTER = "Generative AI, OCI Generative AI, GENERATIVE_AI";
 const WEEKDAY_LABELS_JA = ["日", "月", "火", "水", "木", "金", "土"];
 
 const aiModeLabels: Record<AiRunMode, string> = {
   "native-chat": "OCI Generative AI Chat",
+  "enterprise-chat": "OCI Enterprise AI Chat",
   embedding: "OCI Generative AI Embedding",
   rerank: "OCI Generative AI Rerank"
 };
 
 const aiModeShortLabels: Record<AiRunMode, string> = {
   "native-chat": "Chat",
+  "enterprise-chat": "Enterprise Chat",
   embedding: "Embedding",
   rerank: "Rerank"
 };
@@ -234,9 +243,59 @@ function createDefaultOfficialUsageQuery(): OfficialUsageQuery {
   };
 }
 
-function buildOciUsageCostRequest(query: OfficialUsageQuery): OciUsageCostRequest {
+function normalizeOcid(value: string) {
+  return value.trim();
+}
+
+function compactOcid(value: string) {
+  const normalized = normalizeOcid(value);
+  if (normalized.length <= 34) return normalized || "未入力";
+  return `${normalized.slice(0, 22)}...${normalized.slice(-10)}`;
+}
+
+function getOfficialCompartmentOptions(settings: AppState["settings"]): OfficialCompartmentOption[] {
+  const tenancyOcid = normalizeOcid(settings.tenancyOcid);
+  const defaultCompartmentOcid = normalizeOcid(settings.defaultCompartmentOcid);
+  const options: OfficialCompartmentOption[] = [];
+
+  if (tenancyOcid) {
+    options.push({
+      label: "テナンシ",
+      ocid: tenancyOcid,
+      defaultChecked: !defaultCompartmentOcid
+    });
+  }
+
+  if (defaultCompartmentOcid) {
+    const existing = options.find((option) => option.ocid === defaultCompartmentOcid);
+    if (existing) {
+      existing.label = "テナンシ / 既定Compartment";
+      existing.defaultChecked = true;
+    } else {
+      options.push({
+        label: "既定Compartment",
+        ocid: defaultCompartmentOcid,
+        defaultChecked: true
+      });
+    }
+  }
+
+  return options;
+}
+
+function getDefaultOfficialCompartmentSelection(options: OfficialCompartmentOption[]) {
+  const defaultSelection = options.filter((option) => option.defaultChecked).map((option) => option.ocid);
+  return defaultSelection.length ? defaultSelection : options.slice(0, 1).map((option) => option.ocid);
+}
+
+function isZeroAmountOfficialCost(item: OfficialCostItem) {
+  return Math.abs(item.computedAmountUsd) < Number.EPSILON;
+}
+
+function buildOciUsageCostRequest(query: OfficialUsageQuery, compartmentOcids: string[] = []): OciUsageCostRequest {
   const startDate = readDateInputValue(query.startDate);
   const endDate = readDateInputValue(query.endDate);
+  const compartmentFilters = Array.from(new Set(compartmentOcids.map(normalizeOcid).filter(Boolean)));
   if (!startDate || !endDate) {
     throw new Error("公式コスト取得の開始日と終了日を確認してください。");
   }
@@ -259,6 +318,7 @@ function buildOciUsageCostRequest(query: OfficialUsageQuery): OciUsageCostReques
       timeUsageEnded: `${formatDateInputValue(ended)}T00:00:00Z`,
       granularity: query.granularity,
       serviceFilter: query.serviceFilter,
+      compartmentFilters,
       compartmentDepth: 6,
       groupBy: DEFAULT_OFFICIAL_USAGE_GROUP_BY
     };
@@ -274,6 +334,7 @@ function buildOciUsageCostRequest(query: OfficialUsageQuery): OciUsageCostReques
     timeUsageEnded: `${formatDateInputValue(addUtcDays(endDate, 1))}T00:00:00Z`,
     granularity: query.granularity,
     serviceFilter: query.serviceFilter,
+    compartmentFilters,
     compartmentDepth: 6,
     groupBy: DEFAULT_OFFICIAL_USAGE_GROUP_BY
   };
@@ -319,7 +380,7 @@ function getDashboardNextAction({
   if (!hasAiUsage) {
     return {
       title: "AI実行を記録",
-      description: "Chat または Embedding を実行し、レスポンスから使用量レコードを自動作成します。",
+      description: "Chat / Enterprise Chat / Embedding / Rerank を実行し、レスポンスから使用量レコードを自動作成します。",
       buttonLabel: "AI実行へ",
       view: "ai",
       icon: Bot,
@@ -523,12 +584,83 @@ function buildOfficialCostRows(items: OfficialCostItem[]): ExcelCellValue[][] {
   ];
 }
 
-function buildOfficialCostXlsx(items: OfficialCostItem[]) {
-  const rows = buildOfficialCostRows(items);
+function buildUsageRecordRows(records: UsageRecord[]): ExcelCellValue[][] {
+  const headers = [
+    "日時",
+    "ソース",
+    "サービス",
+    "リージョン",
+    "Compartment OCID",
+    "Project名",
+    "Project OCID",
+    "モデル",
+    "Request ID",
+    "状態",
+    "リクエスト数",
+    "入力トークン",
+    "キャッシュ入力トークン",
+    "出力トークン",
+    "合計トークン",
+    "検索単位",
+    "イベント数",
+    "ストレージGB時間",
+    "画像数",
+    "専用ユニット時間",
+    "接続分",
+    "入力文字数",
+    "出力文字数",
+    "合計文字数",
+    "レイテンシms",
+    "Price List単位",
+    "推定コストUSD",
+    "公式按分USD",
+    "照合済み",
+    "メモ"
+  ];
+
+  return [
+    headers,
+    ...records.map((record) => [
+      record.occurredAt || "",
+      record.source || "",
+      record.service || "",
+      record.region || "",
+      record.compartmentOcid || "",
+      record.projectName || "",
+      record.projectOcid || "",
+      record.modelId || "",
+      record.opcRequestId || "",
+      record.status || "",
+      record.requestCount,
+      record.promptTokens,
+      record.cachedInputTokens,
+      record.completionTokens,
+      record.promptTokens + record.cachedInputTokens + record.completionTokens,
+      record.searchUnits,
+      record.eventCount,
+      record.storageGbHours,
+      record.imageCount,
+      record.dedicatedUnitHours,
+      record.connectionMinutes,
+      record.inputCharacters,
+      record.outputCharacters,
+      record.inputCharacters + record.outputCharacters,
+      record.latencyMs,
+      formatUsagePriceListUnits(record),
+      record.estimatedCostUsd,
+      record.officialAllocatedCostUsd,
+      record.billingReconciled ? "はい" : "いいえ",
+      record.notes || ""
+    ])
+  ];
+}
+
+function buildWorkbookXlsx(rows: ExcelCellValue[][], sheetName: string) {
   const lastColumn = xlsxColumnName(rows[0].length - 1);
   const dimension = `A1:${lastColumn}${rows.length}`;
   const sheetRows = rows.map((row, index) => xlsxRow(row, index + 1)).join("\n");
   const generatedAt = new Date().toISOString();
+  const safeSheetName = escapeXml(sheetName);
 
   const worksheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
@@ -579,7 +711,7 @@ ${sheetRows}
   </HeadingPairs>
   <TitlesOfParts>
     <vt:vector size="1" baseType="lpstr">
-      <vt:lpstr>公式コスト明細</vt:lpstr>
+      <vt:lpstr>${safeSheetName}</vt:lpstr>
     </vt:vector>
   </TitlesOfParts>
   <Company>No.1 OCI AI Observability Hub</Company>
@@ -604,7 +736,7 @@ ${sheetRows}
       content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
   <sheets>
-    <sheet name="公式コスト明細" sheetId="1" r:id="rId1"/>
+    <sheet name="${safeSheetName}" sheetId="1" r:id="rId1"/>
   </sheets>
 </workbook>`
     },
@@ -620,6 +752,14 @@ ${sheetRows}
       content: worksheetXml
     }
   ]);
+}
+
+function buildOfficialCostXlsx(items: OfficialCostItem[]) {
+  return buildWorkbookXlsx(buildOfficialCostRows(items), "公式コスト明細");
+}
+
+function buildUsageRecordXlsx(records: UsageRecord[]) {
+  return buildWorkbookXlsx(buildUsageRecordRows(records), "使用量レコード");
 }
 
 function createCrc32Table() {
@@ -752,6 +892,15 @@ async function downloadOfficialCostExcel(items: OfficialCostItem[]) {
   return saveOfficialCostExcel(fileName, workbook, XLSX_MIME_TYPE);
 }
 
+async function downloadUsageRecordExcel(records: UsageRecord[]) {
+  if (!records.length) {
+    throw new Error("ダウンロードできる使用量レコードがありません。");
+  }
+  const workbook = buildUsageRecordXlsx(records);
+  const fileName = `使用量レコード_${formatDateInputValue(new Date())}.xlsx`;
+  return saveOfficialCostExcel(fileName, workbook, XLSX_MIME_TYPE);
+}
+
 function getErrorMessage(error: unknown, fallback: string) {
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === "string" && error.trim()) return error;
@@ -782,6 +931,22 @@ function App() {
   const [aiResult, setAiResult] = useState<OciAiRunResult | null>(null);
   const [toastSerial, setToastSerial] = useState(0);
   const [dismissedToastSerial, setDismissedToastSerial] = useState(0);
+  const [theme, setTheme] = useState<"soft-dark" | "deep-dark">(() => {
+    const saved = localStorage.getItem("app-theme");
+    return saved === "deep-dark" ? "deep-dark" : "soft-dark";
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === "deep-dark") {
+      root.classList.add("theme-deep-dark");
+      root.classList.remove("theme-soft-dark");
+    } else {
+      root.classList.add("theme-soft-dark");
+      root.classList.remove("theme-deep-dark");
+    }
+    localStorage.setItem("app-theme", theme);
+  }, [theme]);
   const updateMessage = (nextMessage: string) => {
     setMessage(nextMessage);
     setToastSerial((current) => current + 1);
@@ -854,26 +1019,27 @@ function App() {
     await persist(nextState, "使用量レコードを削除しました。");
   };
 
-  const handleFetchOfficialFromOci = async () => {
+  const handleFetchOfficialFromOci = async (compartmentOcids: string[]) => {
     setIsOfficialFetching(true);
     updateMessage("OCI Usage API から公式コストを取得しています。");
     try {
-      const request = buildOciUsageCostRequest(officialUsageQuery);
+      const request = buildOciUsageCostRequest(officialUsageQuery, compartmentOcids);
       const response = await fetchOciUsageCosts(state, request);
       const allItems = parseOfficialCostJson(JSON.stringify(response));
       const items = filterGenerativeAiOfficialCosts(allItems);
       const excludedCount = allItems.length - items.length;
+      const compartmentMessage = compartmentOcids.length ? `対象Compartment ${compartmentOcids.length}件で` : "";
       if (!items.length) {
         updateMessage(
           allItems.length
-            ? `取得結果 ${allItems.length} 件のうち、Generative AI SKU と判定できる明細はありませんでした。サービスフィルターとSKU名を確認してください。`
+            ? `${compartmentMessage}取得した ${allItems.length} 件のうち、Generative AI SKU と判定できる明細はありませんでした。サービスフィルターとSKU名を確認してください。`
             : "指定した条件では公式コスト明細を確認できませんでした。期間またはサービスフィルターを調整してください。"
         );
         return;
       }
       const resultMessage = excludedCount
-        ? `OCI Usage API から Generative AI SKU ${items.length} 件を取得しました。非対象SKU ${excludedCount} 件は除外しました。`
-        : `OCI Usage API から Generative AI SKU ${items.length} 件を取得しました。`;
+        ? `OCI Usage API から${compartmentMessage} Generative AI SKU ${items.length} 件を取得しました。非対象SKU ${excludedCount} 件は除外しました。`
+        : `OCI Usage API から${compartmentMessage} Generative AI SKU ${items.length} 件を取得しました。`;
       const nextState = addActivity(
         { ...state, officialCosts: [...items, ...state.officialCosts] },
         resultMessage
@@ -886,21 +1052,31 @@ function App() {
     }
   };
 
-  const handleDownloadOfficialCostExcel = async () => {
+  const handleDownloadOfficialCostExcel = async (items: OfficialCostItem[]) => {
     try {
-      const savedPath = await downloadOfficialCostExcel(state.officialCosts);
+      const savedPath = await downloadOfficialCostExcel(items);
       updateMessage(`Excelをダウンロードしました: ${savedPath}`);
     } catch (error) {
       updateMessage(getErrorMessage(error, "Excelダウンロードに失敗しました。"));
     }
   };
 
-  const handleReconcile = async () => {
-    if (!state.officialCosts.length || !state.usageRecords.length) {
+  const handleDownloadUsageRecordExcel = async (records: UsageRecord[]) => {
+    try {
+      const savedPath = await downloadUsageRecordExcel(records);
+      updateMessage(`Excelをダウンロードしました: ${savedPath}`);
+    } catch (error) {
+      updateMessage(getErrorMessage(error, "Excelダウンロードに失敗しました。"));
+    }
+  };
+
+  const handleReconcile = async (officialCosts: OfficialCostItem[]) => {
+    if (!officialCosts.length || !state.usageRecords.length) {
       updateMessage("照合する公式コストまたは使用量レコードがありません。");
       return;
     }
-    await persist(reconcileOfficialCosts(state), "公式コストを使用量レコードへ按分しました。");
+    const reconciledState = reconcileOfficialCosts({ ...state, officialCosts });
+    await persist({ ...reconciledState, officialCosts: state.officialCosts }, "表示中の公式コストを使用量レコードへ按分しました。");
   };
 
   const handleSettingsSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -1004,6 +1180,8 @@ function App() {
     try {
       const result = mode === "native-chat"
         ? await runOciGenerativeAiChat(state, request)
+        : mode === "enterprise-chat"
+          ? await runOciEnterpriseAiChat(state, request)
         : mode === "embedding"
           ? await runOciEmbedding(state, request)
           : await runOciRerank(state, request);
@@ -1068,8 +1246,19 @@ function App() {
           })}
         </nav>
         <div className="sidebarFooter">
-          <span className={settingsValidation.ready ? "statusDot ok" : "statusDot warn"} />
-          <span>{settingsValidation.ready ? "OCI設定済み" : "OCI設定待ち"}</span>
+          <div className="sidebarFooterStatus">
+            <span className={settingsValidation.ready ? "statusDot ok" : "statusDot warn"} />
+            <span>{settingsValidation.ready ? "OCI設定済み" : "OCI設定待ち"}</span>
+          </div>
+          <button
+            type="button"
+            className="themeQuickToggle"
+            onClick={() => setTheme(theme === "soft-dark" ? "deep-dark" : "soft-dark")}
+            title={theme === "soft-dark" ? "ディープ・ブルーダークへ切り替え" : "アイケア・ソフトダークへ切り替え"}
+            aria-label="テーマ切り替え"
+          >
+            {theme === "soft-dark" ? <EyeOff size={14} /> : <Eye size={14} />}
+          </button>
         </div>
       </aside>
 
@@ -1127,6 +1316,7 @@ function App() {
               onQueryChange={setUsageQuery}
               statusFilter={usageStatusFilter}
               onStatusFilterChange={setUsageStatusFilter}
+              onDownloadExcel={handleDownloadUsageRecordExcel}
             />
           )}
 
@@ -1161,6 +1351,8 @@ function App() {
               onRefreshOraclePricing={handleRefreshOraclePricing}
               onValidateSettings={handleValidateSettings}
               isPricingRefreshing={isPricingRefreshing}
+              theme={theme}
+              onThemeChange={setTheme}
             />
           )}
         </div>
@@ -1452,7 +1644,7 @@ function WorkflowBoard({
   const steps: Array<{ label: string; caption: string; done: boolean; action: string; view: ViewId; icon: LucideIcon }> = [
     { label: "OCI設定", caption: "APIキーとリージョン", done: settingsReady, action: "設定", view: "settings", icon: ShieldCheck },
     { label: "公式価格", caption: "Oracle Pricing API", done: hasOfficialPricing, action: "取得", view: "settings", icon: CircleDollarSign },
-    { label: "AI実行", caption: "Chat / Embed / Rerank", done: hasAiUsage, action: "実行", view: "ai", icon: Bot },
+    { label: "AI実行", caption: "Chat / Enterprise / Embed / Rerank", done: hasAiUsage, action: "実行", view: "ai", icon: Bot },
     { label: "使用量保存", caption: "自動記録レコード", done: hasUsage, action: "確認", view: "usage", icon: DatabaseZap },
     { label: "コスト照合", caption: "Usage API取得", done: hasOfficialCost && reconciliationPercent > 0, action: hasOfficialCost ? "確認" : "取得", view: "official", icon: Workflow }
   ];
@@ -1653,7 +1845,8 @@ function UsageView({
   query,
   onQueryChange,
   statusFilter,
-  onStatusFilterChange
+  onStatusFilterChange,
+  onDownloadExcel
 }: {
   state: AppState;
   onRemoveUsage: (id: string) => void;
@@ -1663,6 +1856,7 @@ function UsageView({
   onQueryChange: (value: string) => void;
   statusFilter: UsageRecord["status"] | "すべて";
   onStatusFilterChange: (value: UsageRecord["status"] | "すべて") => void;
+  onDownloadExcel: (records: UsageRecord[]) => void | Promise<void>;
 }) {
   const normalizedQuery = query.trim().toLowerCase();
   const estimatedTotal = state.usageRecords.reduce((sum, record) => sum + record.estimatedCostUsd, 0);
@@ -1679,6 +1873,20 @@ function UsageView({
     ].some((value) => value.toLowerCase().includes(normalizedQuery));
     return matchesStatus && matchesQuery;
   });
+  const [usageRecordPage, setUsageRecordPage] = useState(1);
+  const usageRecordCount = filteredRecords.length;
+  const totalUsageRecordPages = Math.max(1, Math.ceil(usageRecordCount / USAGE_RECORD_PAGE_SIZE));
+  const currentUsageRecordPage = Math.min(usageRecordPage, totalUsageRecordPages);
+  const usageRecordPageStart = usageRecordCount ? (currentUsageRecordPage - 1) * USAGE_RECORD_PAGE_SIZE : 0;
+  const usageRecordPageItems = filteredRecords.slice(usageRecordPageStart, usageRecordPageStart + USAGE_RECORD_PAGE_SIZE);
+  const usageRecordRangeStart = usageRecordCount ? usageRecordPageStart + 1 : 0;
+  const usageRecordRangeEnd = Math.min(usageRecordPageStart + USAGE_RECORD_PAGE_SIZE, usageRecordCount);
+
+  useEffect(() => {
+    if (usageRecordPage !== currentUsageRecordPage) {
+      setUsageRecordPage(currentUsageRecordPage);
+    }
+  }, [currentUsageRecordPage, usageRecordPage]);
 
   return (
     <section className="pageStack">
@@ -1693,9 +1901,28 @@ function UsageView({
         ]}
       />
       <section className="panel">
-        <div className="panelHeader">
-          <h2>使用量レコード</h2>
-          <span>{filteredRecords.length} / {state.usageRecords.length} 件</span>
+        <div className="panelHeader detailHeader">
+          <div>
+            <h2>使用量レコード</h2>
+            <span>
+              {usageRecordCount
+                ? `${formatNumber(usageRecordRangeStart)}-${formatNumber(usageRecordRangeEnd)} / ${formatNumber(usageRecordCount)}件を表示`
+                : "0件"}
+              {usageRecordCount ? `（${USAGE_RECORD_PAGE_SIZE}件/ページ）` : ""}
+              {state.usageRecords.length ? ` / 保存 ${formatNumber(state.usageRecords.length)}件` : ""}
+            </span>
+          </div>
+          <div className="detailHeaderActions">
+            <button
+              className="secondaryButton iconButton"
+              type="button"
+              onClick={() => onDownloadExcel(filteredRecords)}
+              disabled={!usageRecordCount}
+            >
+              <Download size={16} aria-hidden="true" />
+              <span>表示分をExcelダウンロード</span>
+            </button>
+          </div>
         </div>
         <div className="toolbar">
           <label className="searchField">
@@ -1737,7 +1964,7 @@ function UsageView({
               </tr>
             </thead>
             <tbody>
-              {filteredRecords.map((record) => (
+              {usageRecordPageItems.map((record) => (
                 <tr key={record.id} className={selectedRecordId === record.id ? "selectedRow" : ""}>
                   <td data-label="日時"><button className="linkButton" type="button" onClick={() => onSelectRecord(record.id)}>{formatDateTime(record.occurredAt)}</button></td>
                   <td data-label="モデル">{record.modelId || "-"}</td>
@@ -1779,6 +2006,34 @@ function UsageView({
             />
           )}
         </div>
+        {usageRecordCount > 0 && (
+          <div className="paginationBar" aria-label="使用量レコードページ操作">
+            <span>
+              {formatNumber(usageRecordRangeStart)}-{formatNumber(usageRecordRangeEnd)} / {formatNumber(usageRecordCount)}件
+            </span>
+            <div className="paginationControls">
+              <button
+                className="secondaryButton iconButton pagerButton"
+                type="button"
+                onClick={() => setUsageRecordPage((page) => Math.max(1, page - 1))}
+                disabled={currentUsageRecordPage <= 1}
+              >
+                <ChevronLeft size={16} aria-hidden="true" />
+                <span>前へ</span>
+              </button>
+              <span className="pageIndicator">{formatNumber(currentUsageRecordPage)} / {formatNumber(totalUsageRecordPages)}ページ</span>
+              <button
+                className="secondaryButton iconButton pagerButton"
+                type="button"
+                onClick={() => setUsageRecordPage((page) => Math.min(totalUsageRecordPages, page + 1))}
+                disabled={currentUsageRecordPage >= totalUsageRecordPages}
+              >
+                <span>次へ</span>
+                <ChevronRight size={16} aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+        )}
       </section>
     </section>
   );
@@ -1935,12 +2190,57 @@ function OfficialCostView({
   usageQuery: OfficialUsageQuery;
   isFetching: boolean;
   onUsageQueryChange: (value: OfficialUsageQuery) => void;
-  onFetchOfficial: () => void;
-  onDownloadExcel: () => void | Promise<void>;
-  onReconcile: () => void;
+  onFetchOfficial: (compartmentOcids: string[]) => void;
+  onDownloadExcel: (items: OfficialCostItem[]) => void | Promise<void>;
+  onReconcile: (items: OfficialCostItem[]) => void;
 }) {
   const hasUsageRange = Boolean(usageQuery.startDate && usageQuery.endDate);
   const homeRegion = getHomeRegion(state.settings);
+  const compartmentOptions = useMemo(
+    () => getOfficialCompartmentOptions(state.settings),
+    [state.settings.tenancyOcid, state.settings.defaultCompartmentOcid]
+  );
+  const compartmentOptionsKey = compartmentOptions.map((option) => option.ocid).join("\n");
+  const [selectedCompartmentOcids, setSelectedCompartmentOcids] = useState<string[]>(() =>
+    getDefaultOfficialCompartmentSelection(getOfficialCompartmentOptions(state.settings))
+  );
+  const [excludeZeroAmountRecords, setExcludeZeroAmountRecords] = useState(true);
+
+  useEffect(() => {
+    setSelectedCompartmentOcids((current) => {
+      const availableOcids = new Set(compartmentOptions.map((option) => option.ocid));
+      const retained = current.filter((ocid) => availableOcids.has(ocid));
+      if (!retained.length) {
+        return getDefaultOfficialCompartmentSelection(compartmentOptions);
+      }
+      if (retained.length === current.length && retained.every((ocid, index) => ocid === current[index])) {
+        return current;
+      }
+      return retained;
+    });
+  }, [compartmentOptionsKey]);
+
+  const selectedCompartmentSet = useMemo(
+    () => new Set(selectedCompartmentOcids),
+    [selectedCompartmentOcids]
+  );
+  const compartmentScopedOfficialCosts = state.officialCosts.filter((item) =>
+    selectedCompartmentSet.has(normalizeOcid(item.compartmentOcid))
+  );
+  const visibleOfficialCosts = excludeZeroAmountRecords
+    ? compartmentScopedOfficialCosts.filter((item) => !isZeroAmountOfficialCost(item))
+    : compartmentScopedOfficialCosts;
+  const hiddenByCompartmentCount = state.officialCosts.length - compartmentScopedOfficialCosts.length;
+  const hiddenZeroAmountCount = compartmentScopedOfficialCosts.length - visibleOfficialCosts.length;
+  const toggleCompartment = (ocid: string, checked: boolean) => {
+    setSelectedCompartmentOcids((current) => {
+      if (checked) {
+        const next = new Set([...current, ocid]);
+        return compartmentOptions.filter((option) => next.has(option.ocid)).map((option) => option.ocid);
+      }
+      return current.filter((currentOcid) => currentOcid !== ocid);
+    });
+  };
   const costSettingsReady = Boolean(
     state.settings.tenancyOcid &&
     state.settings.userOcid &&
@@ -1948,15 +2248,16 @@ function OfficialCostView({
     state.settings.privateKeyPem &&
     homeRegion
   );
-  const canFetchFromOci = costSettingsReady && hasUsageRange && !isFetching;
-  const canReconcile = state.officialCosts.length > 0 && state.usageRecords.length > 0;
-  const officialTotal = state.officialCosts.reduce((sum, item) => sum + item.computedAmountUsd, 0);
+  const hasSelectedCompartment = selectedCompartmentOcids.length > 0;
+  const canFetchFromOci = costSettingsReady && hasUsageRange && hasSelectedCompartment && !isFetching;
+  const canReconcile = visibleOfficialCosts.length > 0 && state.usageRecords.length > 0;
+  const officialTotal = visibleOfficialCosts.reduce((sum, item) => sum + item.computedAmountUsd, 0);
   const [officialCostPage, setOfficialCostPage] = useState(1);
-  const officialCostCount = state.officialCosts.length;
+  const officialCostCount = visibleOfficialCosts.length;
   const totalOfficialPages = Math.max(1, Math.ceil(officialCostCount / OFFICIAL_COST_PAGE_SIZE));
   const currentOfficialPage = Math.min(officialCostPage, totalOfficialPages);
   const officialCostPageStart = officialCostCount ? (currentOfficialPage - 1) * OFFICIAL_COST_PAGE_SIZE : 0;
-  const officialCostPageItems = state.officialCosts.slice(officialCostPageStart, officialCostPageStart + OFFICIAL_COST_PAGE_SIZE);
+  const officialCostPageItems = visibleOfficialCosts.slice(officialCostPageStart, officialCostPageStart + OFFICIAL_COST_PAGE_SIZE);
   const officialCostRangeStart = officialCostCount ? officialCostPageStart + 1 : 0;
   const officialCostRangeEnd = Math.min(officialCostPageStart + OFFICIAL_COST_PAGE_SIZE, officialCostCount);
 
@@ -1973,7 +2274,7 @@ function OfficialCostView({
         title="コスト照合"
         description="OCI Usage API から公式コストを取得し、使用量レコードへ按分します。Enterprise AI Project、Compartment、Region が揃うほど照合しやすくなります。"
         items={[
-          { label: "公式明細", value: `${formatNumber(state.officialCosts.length)}件` },
+          { label: "公式明細", value: `${formatNumber(officialCostCount)}件` },
           { label: "公式合計", value: formatUsd(officialTotal) },
           { label: "Home Region", value: homeRegion || "未入力" },
           { label: "照合対象", value: `${formatNumber(state.usageRecords.length)}件` }
@@ -2019,7 +2320,7 @@ function OfficialCostView({
             <ReceiptText size={17} aria-hidden="true" />
             <div>
               <strong>公式コスト</strong>
-              <span>{state.officialCosts.length ? `${state.officialCosts.length}件` : "未取込"}</span>
+              <span>{state.officialCosts.length ? `${formatNumber(officialCostCount)} / ${formatNumber(state.officialCosts.length)}件表示` : "未取込"}</span>
             </div>
           </div>
         </div>
@@ -2028,7 +2329,7 @@ function OfficialCostView({
             className="usageApiForm"
             onSubmit={(event) => {
               event.preventDefault();
-              onFetchOfficial();
+              onFetchOfficial(selectedCompartmentOcids);
             }}
           >
             <p className="helperText">
@@ -2064,12 +2365,47 @@ function OfficialCostView({
                 />
               </label>
             </div>
+            <fieldset className="filterControlGroup">
+              <legend>表示対象Compartment</legend>
+              <div className="checkGrid">
+                {compartmentOptions.map((option) => (
+                  <label className="checkOption" key={option.ocid}>
+                    <input
+                      type="checkbox"
+                      checked={selectedCompartmentSet.has(option.ocid)}
+                      onChange={(event) => toggleCompartment(option.ocid, event.target.checked)}
+                    />
+                    <span>
+                      <strong>{option.label}</strong>
+                      <small>{compactOcid(option.ocid)}</small>
+                    </span>
+                  </label>
+                ))}
+                <label className="checkOption">
+                  <input
+                    type="checkbox"
+                    checked={excludeZeroAmountRecords}
+                    onChange={(event) => setExcludeZeroAmountRecords(event.target.checked)}
+                  />
+                  <span>
+                    <strong>金額0の明細を除外</strong>
+                    <small>{excludeZeroAmountRecords ? `${formatNumber(hiddenZeroAmountCount)}件を非表示` : "0円明細も表示中"}</small>
+                  </span>
+                </label>
+              </div>
+              {!compartmentOptions.length && (
+                <p className="inlineNotice" role="note">
+                  <ShieldCheck size={15} aria-hidden="true" />
+                  テナンシ OCID または既定 Compartment OCID を設定してください。
+                </p>
+              )}
+            </fieldset>
             <div className="actions">
               <button className="primaryButton iconButton" type="submit" disabled={!canFetchFromOci}>
                 {isFetching ? <span className="buttonSpinner" aria-hidden="true" /> : <CloudDownload size={16} aria-hidden="true" />}
                 <span>{isFetching ? "取得中" : "OCIから公式コストを取得"}</span>
               </button>
-              <button className="secondaryButton iconButton" type="button" onClick={onReconcile} disabled={!canReconcile}>
+              <button className="secondaryButton iconButton" type="button" onClick={() => onReconcile(visibleOfficialCosts)} disabled={!canReconcile}>
                 <CheckCircle2 size={16} aria-hidden="true" />
                 <span>使用量へ按分する</span>
               </button>
@@ -2079,6 +2415,12 @@ function OfficialCostView({
                   Home Region とOCI APIキー設定を保存するとAPI取得できます。
                 </p>
               )}
+              {costSettingsReady && !hasSelectedCompartment && (
+                <p className="inlineNotice" role="note">
+                  <ListFilter size={15} aria-hidden="true" />
+                  対象Compartmentを1つ以上選択してください。
+                </p>
+              )}
             </div>
           </form>
           <aside className="importChecklist" aria-label="Usage API 取得条件">
@@ -2086,9 +2428,10 @@ function OfficialCostView({
             <span><CheckCircle2 size={15} aria-hidden="true" /> queryType: COST</span>
             <span><CheckCircle2 size={15} aria-hidden="true" /> endpoint: usageapi.{homeRegion || "home-region"}.oci.oraclecloud.com</span>
             <span><CheckCircle2 size={15} aria-hidden="true" /> groupBy: service / skuName / compartmentId / region</span>
+            <span><CheckCircle2 size={15} aria-hidden="true" /> compartmentId: 選択中 {formatNumber(selectedCompartmentOcids.length)}件</span>
             <span><CheckCircle2 size={15} aria-hidden="true" /> compartmentDepth: 6</span>
             <span><CheckCircle2 size={15} aria-hidden="true" /> 取得後にGenerative AI SKUのみ保存</span>
-            <span><CheckCircle2 size={15} aria-hidden="true" /> フィルター空欄時は全サービス</span>
+            <span><CheckCircle2 size={15} aria-hidden="true" /> 金額0除外: {excludeZeroAmountRecords ? "有効" : "無効"}</span>
           </aside>
         </div>
       </section>
@@ -2102,17 +2445,21 @@ function OfficialCostView({
                 ? `${formatNumber(officialCostRangeStart)}-${formatNumber(officialCostRangeEnd)} / ${formatNumber(officialCostCount)}件を表示`
                 : "0件"}
               {officialCostCount ? `（${OFFICIAL_COST_PAGE_SIZE}件/ページ）` : ""}
+              {state.officialCosts.length ? ` / 保存 ${formatNumber(state.officialCosts.length)}件` : ""}
             </span>
           </div>
           <div className="detailHeaderActions">
+            <span className="filterSummaryLine">
+              Compartment外 {formatNumber(hiddenByCompartmentCount)}件 / 金額0 {formatNumber(hiddenZeroAmountCount)}件除外
+            </span>
             <button
               className="secondaryButton iconButton"
               type="button"
-              onClick={onDownloadExcel}
+              onClick={() => onDownloadExcel(visibleOfficialCosts)}
               disabled={!officialCostCount}
             >
               <Download size={16} aria-hidden="true" />
-              <span>Excelをダウンロード</span>
+              <span>表示分をExcelダウンロード</span>
             </button>
           </div>
         </div>
@@ -2152,6 +2499,13 @@ function OfficialCostView({
               description="OCI Usage API から公式コストを取得すると、ここに明細が表示されます。"
               actionLabel="取得欄へ"
               href="#official-import-panel"
+            />
+          )}
+          {state.officialCosts.length > 0 && !officialCostPageItems.length && (
+            <EmptyDataState
+              icon={ListFilter}
+              title="条件に一致する公式コスト明細がありません"
+              description="Compartment の選択、または金額0の除外設定を変更してください。"
             />
           )}
         </div>
@@ -2204,20 +2558,29 @@ function AiRunView({
   const [mode, setMode] = useState<AiRunMode>("native-chat");
   const settingsReady = validateSettings(state.settings).ready;
   const selectedModeLabel = aiModeLabels[mode];
-  const isChatMode = mode === "native-chat";
+  const isEnterpriseChatMode = mode === "enterprise-chat";
+  const isChatMode = mode === "native-chat" || isEnterpriseChatMode;
   const isEmbeddingMode = mode === "embedding";
   const isRerankMode = mode === "rerank";
   const aiRegion = getAiRegion(state.settings);
+  const enterpriseAiRegion = extractGenerativeAiRegion(state.settings.enterpriseAiBaseUrl);
+  const effectiveAiRegion = isEnterpriseChatMode ? enterpriseAiRegion || aiRegion : aiRegion;
   const modelDefault = isEmbeddingMode
     ? state.settings.defaultEmbeddingModelId
     : isRerankMode
       ? state.settings.defaultRerankModelId
       : state.settings.defaultChatModelId;
-  const canRunAi = settingsReady;
-  const runButtonLabel = !canRunAi ? "設定が必要" : isRunning ? "実行中" : `${selectedModeLabel} を実行`;
   const hasDefaultModel = Boolean(modelDefault);
   const hasDefaultCompartment = Boolean(state.settings.defaultCompartmentOcid);
-  const hasAiRegion = Boolean(aiRegion);
+  const hasAiRegion = Boolean(effectiveAiRegion);
+  const hasEnterpriseAiBaseUrl = Boolean(state.settings.enterpriseAiBaseUrl);
+  const hasEnterpriseAiApiKey = Boolean(state.settings.enterpriseAiApiKey);
+  const hasEnterpriseAiProject = Boolean(state.settings.enterpriseAiProjectOcid);
+  const enterpriseAiReady = hasEnterpriseAiBaseUrl && hasEnterpriseAiApiKey && hasDefaultModel;
+  const canRunAi = isEnterpriseChatMode ? enterpriseAiReady : settingsReady;
+  const statusReady = isEnterpriseChatMode ? enterpriseAiReady && hasEnterpriseAiProject : settingsReady;
+  const runButtonLabel = !canRunAi ? "設定が必要" : isRunning ? "実行中" : `${selectedModeLabel} を実行`;
+  const credentialReady = isEnterpriseChatMode ? hasEnterpriseAiApiKey : settingsReady;
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -2226,6 +2589,7 @@ function AiRunView({
       region: String(form.get("region") || ""),
       modelId: String(form.get("modelId") || ""),
       compartmentOcid: String(form.get("compartmentOcid") || ""),
+      projectOcid: String(form.get("projectOcid") || ""),
       prompt: String(form.get("prompt") || ""),
       input: String(form.get("input") || ""),
       documents: String(form.get("documents") || ""),
@@ -2247,18 +2611,28 @@ function AiRunView({
       <PageLead
         icon={Bot}
         title="AI実行と自動記録"
-        description="OCI Generative AI Chat / Embedding / Rerank を実行し、レスポンスからトークン、文字数、レイテンシ、OPC Request ID を使用量へ保存します。"
+        description="OCI Generative AI Chat / Enterprise AI Chat / Embedding / Rerank を実行し、レスポンスからトークン、文字数、レイテンシ、OPC Request ID を使用量へ保存します。"
         items={[
           { label: "実行モード", value: aiModeShortLabels[mode] },
-          { label: "AIリージョン", value: aiRegion || "未入力" },
+          { label: "AIリージョン", value: effectiveAiRegion || "未入力" },
           { label: "既定モデル", value: hasDefaultModel ? "あり" : "未入力" }
         ]}
       />
-      <section className={settingsReady ? "statusPanel ready" : "statusPanel attention"}>
+      <section className={statusReady ? "statusPanel ready" : "statusPanel attention"}>
         <Bot size={20} aria-hidden="true" />
         <div>
           <h2>{selectedModeLabel}</h2>
-          <p>{settingsReady ? `既定では ${aiRegion} で実行します。必要な場合は本実行だけ変更できます。` : "OCI APIキー設定とAI実行リージョンを保存してください。"}</p>
+          <p>
+            {isEnterpriseChatMode
+              ? statusReady
+                ? `Enterprise AI Project ${compactOcid(state.settings.enterpriseAiProjectOcid)} で実行します。`
+                : enterpriseAiReady
+                  ? "Enterprise AI Project OCIDを入力してください。"
+                  : "Enterprise AI Base URLとAPIキーを保存してください。"
+              : settingsReady
+                ? `既定では ${aiRegion} で実行します。必要な場合は本実行だけ変更できます。`
+                : "OCI APIキー設定とAI実行リージョンを保存してください。"}
+          </p>
         </div>
         <button className="secondaryButton iconButton" type="button" onClick={() => onNavigate("settings")}>
           <Settings size={16} aria-hidden="true" />
@@ -2267,11 +2641,11 @@ function AiRunView({
       </section>
 
       <section className="aiRunSummary" aria-label="AI実行準備">
-        <div className={canRunAi ? "summaryItem ready" : "summaryItem attention"}>
+        <div className={credentialReady ? "summaryItem ready" : "summaryItem attention"}>
           <ShieldCheck size={17} aria-hidden="true" />
           <div>
-            <strong>認証</strong>
-            <span>{canRunAi ? "利用可能" : "設定待ち"}</span>
+            <strong>{isEnterpriseChatMode ? "APIキー" : "認証"}</strong>
+            <span>{credentialReady ? "利用可能" : "設定待ち"}</span>
           </div>
         </div>
         <div className={hasDefaultModel ? "summaryItem ready" : "summaryItem attention"}>
@@ -2285,14 +2659,14 @@ function AiRunView({
           <MapPin size={17} aria-hidden="true" />
           <div>
             <strong>AIリージョン</strong>
-            <span>{hasAiRegion ? aiRegion : "未入力"}</span>
+            <span>{hasAiRegion ? effectiveAiRegion : "未入力"}</span>
           </div>
         </div>
-        <div className={hasDefaultCompartment ? "summaryItem ready" : "summaryItem neutral"}>
-          <DatabaseZap size={17} aria-hidden="true" />
+        <div className={isEnterpriseChatMode ? hasEnterpriseAiProject ? "summaryItem ready" : "summaryItem attention" : hasDefaultCompartment ? "summaryItem ready" : "summaryItem neutral"}>
+          {isEnterpriseChatMode ? <FolderKanban size={17} aria-hidden="true" /> : <DatabaseZap size={17} aria-hidden="true" />}
           <div>
-            <strong>Compartment</strong>
-            <span>{hasDefaultCompartment ? "既定値あり" : "実行時に入力"}</span>
+            <strong>{isEnterpriseChatMode ? "Project" : "Compartment"}</strong>
+            <span>{isEnterpriseChatMode ? hasEnterpriseAiProject ? "既定値あり" : "設定待ち" : hasDefaultCompartment ? "既定値あり" : "実行時に入力"}</span>
           </div>
         </div>
       </section>
@@ -2312,6 +2686,15 @@ function AiRunView({
             >
               <Bot size={16} aria-hidden="true" />
               <span>Chat</span>
+            </button>
+            <button
+              className={mode === "enterprise-chat" ? "modeButton active" : "modeButton"}
+              type="button"
+              onClick={() => setMode("enterprise-chat")}
+              aria-pressed={mode === "enterprise-chat"}
+            >
+              <FolderKanban size={16} aria-hidden="true" />
+              <span>Enterprise Chat</span>
             </button>
             <button
               className={mode === "embedding" ? "modeButton active" : "modeButton"}
@@ -2337,12 +2720,26 @@ function AiRunView({
         <form key={mode} className="formSections" onSubmit={handleSubmit} aria-busy={isRunning}>
           <fieldset className="formSection">
             <legend>実行先</legend>
-            <div className="formGrid compact">
-              <Field label="AI実行リージョン" name="region" defaultValue={aiRegion} required />
-              <Field label="モデルID" name="modelId" defaultValue={modelDefault} required />
-              <Field label="Compartment OCID" name="compartmentOcid" defaultValue={state.settings.defaultCompartmentOcid} required />
-            </div>
-            <p className="helperText tight">この値は本実行だけに適用されます。設定ページの既定リージョンは変更されません。</p>
+            {isEnterpriseChatMode ? (
+              <>
+                <input type="hidden" name="region" value={effectiveAiRegion} />
+                <div className="formGrid compact">
+                  <Field label="モデルID" name="modelId" defaultValue={modelDefault} required />
+                  <Field label="Enterprise AI Project OCID" name="projectOcid" defaultValue={state.settings.enterpriseAiProjectOcid} required />
+                  <Field label="記録用 Compartment OCID" name="compartmentOcid" defaultValue={state.settings.defaultCompartmentOcid} />
+                </div>
+                <p className="helperText tight">Base URL: {state.settings.enterpriseAiBaseUrl || "未入力"}</p>
+              </>
+            ) : (
+              <>
+                <div className="formGrid compact">
+                  <Field label="AI実行リージョン" name="region" defaultValue={aiRegion} required />
+                  <Field label="モデルID" name="modelId" defaultValue={modelDefault} required />
+                  <Field label="Compartment OCID" name="compartmentOcid" defaultValue={state.settings.defaultCompartmentOcid} required />
+                </div>
+                <p className="helperText tight">この値は本実行だけに適用されます。設定ページの既定リージョンは変更されません。</p>
+              </>
+            )}
           </fieldset>
 
           {isChatMode && (
@@ -2634,7 +3031,9 @@ function SettingsView({
   onPricingSubmit,
   onRefreshOraclePricing,
   isPricingRefreshing,
-  onValidateSettings
+  onValidateSettings,
+  theme,
+  onThemeChange
 }: {
   state: AppState;
   storageLocation: string;
@@ -2643,6 +3042,8 @@ function SettingsView({
   onRefreshOraclePricing: () => void;
   isPricingRefreshing: boolean;
   onValidateSettings: () => void;
+  theme: "soft-dark" | "deep-dark";
+  onThemeChange: (theme: "soft-dark" | "deep-dark") => void;
 }) {
   const validation = validateSettings(state.settings);
   const officialPricingRules = state.pricingRules.filter((rule) => rule.source === "oracle-pricing-api");
@@ -2673,6 +3074,11 @@ function SettingsView({
     state.settings.defaultRerankModelId
   );
   const enterpriseAiEndpointReady = Boolean(state.settings.enterpriseAiBaseUrl);
+  const enterpriseAiCredentialReady = Boolean(
+    state.settings.enterpriseAiBaseUrl &&
+    state.settings.enterpriseAiProjectOcid &&
+    state.settings.enterpriseAiApiKey
+  );
   const settingsSetupSteps: SetupGuideStep[] = [
     {
       title: "OCI認証",
@@ -2684,27 +3090,27 @@ function SettingsView({
     },
     {
       title: "リージョン設定",
-      description: "公式コスト用のHome RegionとAI実行リージョンを分けて保存します。",
+      description: "秘密鍵PEM、公式コスト用のHome Region、AI実行リージョンを保存します。",
       actionLabel: "リージョンへ",
-      href: "#settings-regions",
-      ready: regionSettingsReady,
+      href: "#settings-private-key",
+      ready: regionSettingsReady && privateKeyReady,
       icon: MapPin
     },
     {
-      title: "秘密鍵",
-      description: "PEM形式の秘密鍵を保存し、API署名に使える状態にします。",
-      actionLabel: "秘密鍵へ",
-      href: "#settings-private-key",
-      ready: privateKeyReady,
-      icon: KeyRound
-    },
-    {
       title: "Generative AIモデル",
-      description: "Chat / Embedding / Rerank の既定モデルを保存します。",
+      description: "Chat / Enterprise Chat / Embedding / Rerank の既定モデルを保存します。",
       actionLabel: "モデルへ",
       href: "#settings-model-defaults",
       ready: modelDefaultsReady,
       icon: Bot
+    },
+    {
+      title: "Enterprise AI",
+      description: "Enterprise AI Chat 用のBase URL、Project OCID、APIキーを保存します。",
+      actionLabel: "Enterprise AIへ",
+      href: "#settings-enterprise-ai",
+      ready: enterpriseAiCredentialReady,
+      icon: FolderKanban
     },
     {
       title: "公式価格",
@@ -2771,12 +3177,58 @@ function SettingsView({
           <FolderKanban size={17} aria-hidden="true" />
           <div>
             <strong>OCI Enterprise AI</strong>
-            <span>{enterpriseAiEndpointReady ? "Base URLあり" : "未入力"}</span>
+            <span>{enterpriseAiCredentialReady ? "Chat設定あり" : enterpriseAiEndpointReady ? "Base URLあり" : "未入力"}</span>
           </div>
         </div>
       </section>
 
       <SettingsSetupGuide steps={settingsSetupSteps} />
+
+      <div className="panel formPanel">
+        <div className="panelHeader">
+          <h2>UI表示設定</h2>
+          <span>画面のテーマや見やすさを調整します</span>
+        </div>
+        <div className="formSections">
+          <fieldset id="settings-theme" className="formSection">
+            <legend>表示テーマ設定</legend>
+            <div className="themeSelectorContainer">
+              <label className="themeOption">
+                <input
+                  type="radio"
+                  name="appTheme"
+                  value="soft-dark"
+                  checked={theme === "soft-dark"}
+                  onChange={() => onThemeChange("soft-dark")}
+                />
+                <div className="themeCard">
+                  <Eye size={18} aria-hidden="true" />
+                  <div>
+                    <strong>アイケア・ソフトダーク（推奨）</strong>
+                    <span>目に優しく疲れにくい、柔らかなコントラストのダークテーマ</span>
+                  </div>
+                </div>
+              </label>
+              <label className="themeOption">
+                <input
+                  type="radio"
+                  name="appTheme"
+                  value="deep-dark"
+                  checked={theme === "deep-dark"}
+                  onChange={() => onThemeChange("deep-dark")}
+                />
+                <div className="themeCard">
+                  <EyeOff size={18} aria-hidden="true" />
+                  <div>
+                    <strong>ディープ・ブルーダーク</strong>
+                    <span>従来のSFチックで深いコントラストのダークテーマ</span>
+                  </div>
+                </div>
+              </label>
+            </div>
+          </fieldset>
+        </div>
+      </div>
 
       <form id="settings-oci-form" className="panel formPanel" onSubmit={onSettingsSubmit}>
         <div className="panelHeader">
@@ -2794,6 +3246,10 @@ function SettingsView({
               <PasswordField label="秘密鍵パスフレーズ" name="passphrase" defaultValue={state.settings.passphrase} />
             </div>
           </fieldset>
+
+          <div id="settings-private-key" className="formSection regionPrivateKeyField" aria-label="秘密鍵 PEM">
+            <PrivateKeyFileField label="秘密鍵 PEM" name="privateKeyPem" defaultValue={state.settings.privateKeyPem} required />
+          </div>
 
           <fieldset id="settings-regions" className="formSection">
             <legend>リージョン設定</legend>
@@ -2813,15 +3269,10 @@ function SettingsView({
                 <Bot size={16} aria-hidden="true" />
                 <div>
                   <strong>AI実行</strong>
-                  <span>Chat / Embedding / Rerank の既定リージョンです。実行時に一時変更できます。</span>
+                  <span>Chat / Enterprise Chat / Embedding / Rerank の既定リージョンです。実行時に一時変更できます。</span>
                 </div>
               </div>
             </div>
-          </fieldset>
-
-          <fieldset id="settings-private-key" className="formSection">
-            <legend>秘密鍵</legend>
-            <PrivateKeyFileField label="秘密鍵 PEM" name="privateKeyPem" defaultValue={state.settings.privateKeyPem} required />
           </fieldset>
 
           <fieldset id="settings-model-defaults" className="formSection">
@@ -3079,10 +3530,16 @@ function PrivateKeyFileField({
     <label className="field">
       <span>{label}{required && <em>必須</em>}</span>
       <input
+        className="srOnly filePickerInput"
         type="file"
+        accept=".pem,.key,.txt"
         required={required && !content}
         onChange={handleChange}
       />
+      <span className="filePickerShell" aria-hidden="true">
+        <span className="filePickerButton">ファイルを選択</span>
+        <span className="filePickerName">{fileName || "未選択"}</span>
+      </span>
       <input type="hidden" name={name} value={content} readOnly />
       <small className={error ? "helperText errorText" : "helperText"}>
         {error || (fileName ? `${fileName} を読み込みました。` : "PEM形式の秘密鍵ファイルを選択してください。")}

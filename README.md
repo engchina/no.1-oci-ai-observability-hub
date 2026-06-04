@@ -1,10 +1,10 @@
 # no.1-oci-ai-observability-hub
 
-OCI Generative AI の Chat / Embedding / Rerank 利用量とコストを、Project 単位で確認するためのデスクトップアプリです。
+OCI Generative AI の Chat / Enterprise AI Chat / Embedding / Rerank 利用量とコストを、Project 単位で確認するためのデスクトップアプリです。
 
 ## できること
 
-- OCI APIキー設定を保存します: テナンシ OCID、ユーザー OCID、フィンガープリント、リージョン、秘密鍵 PEM、既定 Compartment、既定 Project、既定 Chat / Embedding / Rerank モデル。
+- OCI APIキー設定を保存します: テナンシ OCID、ユーザー OCID、フィンガープリント、リージョン、秘密鍵 PEM、既定 Compartment、既定 Project、既定 Chat / Enterprise AI Chat / Embedding / Rerank モデル。
 - OCI Generative AI Chat を実行し、モデルID、入力/出力トークン、入力/出力文字数、レイテンシ、`opc-request-id`、推定コストを使用量レコードへ自動記録します。
 - OCI Generative AI Embedding を実行し、入力文字数、ベクトル件数、次元数、`opc-request-id`、推定コストを使用量レコードへ自動記録します。
 - OCI Generative AI Rerank を実行し、検索クエリ、候補文書、順位件数、`opc-request-id`、推定コストを使用量レコードへ自動記録します。
@@ -25,7 +25,7 @@ https://apexapps.oracle.com/pls/apex/cetools/api/v1/products/
 https://usageapi.<region>.oci.oraclecloud.com/20200107/usage
 ```
 
-このアプリは OCI Generative AI Chat / Embedding / Rerank の実行と、Oracle Price List に掲載される OCI Generative AI / OCI Generative AI Agents 対象SKUの使用量確認に集中しています。その他の AI 実行 API、外部トレース連携、Compute デプロイ機能は対象外です。
+このアプリは OCI Generative AI Chat / Enterprise AI Chat / Embedding / Rerank の実行と、Oracle Price List に掲載される OCI Generative AI / OCI Generative AI Agents 対象SKUの使用量確認に集中しています。その他の AI 実行 API、外部トレース連携、Compute デプロイ機能は対象外です。
 
 ## デスクトップアプリ
 
